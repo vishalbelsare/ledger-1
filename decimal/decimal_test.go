@@ -1,6 +1,7 @@
 package decimal
 
 import (
+	"math/rand"
 	"strings"
 	"testing"
 
@@ -22,6 +23,11 @@ var testCases = []testCase{
 		"divide",
 		NewFromFloat(6.0).StringFixedBank(),
 		NewFromInt(48).Div(NewFromInt(8)).StringFixedBank(),
+	},
+	{
+		"divide-1",
+		NewFromFloat(11.111).StringFixedBank(),
+		NewFromInt(100).Div(NewFromInt(9)).StringFixedBank(),
 	},
 	{
 		"sum",
@@ -108,6 +114,26 @@ var testCases = []testCase{
 		"-0.43",
 		NewFromFloat(-0.43).StringFixedBank(),
 	},
+	{
+		"sub",
+		"5.12",
+		NewFromFloat(5.56).Sub(NewFromFloat(0.44)).StringFixedBank(),
+	},
+	{
+		"neg",
+		"-5.12",
+		NewFromFloat(5.12).Neg().StringFixedBank(),
+	},
+	{
+		"abs-1",
+		"5.12",
+		NewFromFloat(-5.12).Abs().StringFixedBank(),
+	},
+	{
+		"abs-1",
+		"5.12",
+		NewFromFloat(5.12).Abs().StringFixedBank(),
+	},
 }
 
 func TestDecimal(t *testing.T) {
@@ -115,6 +141,42 @@ func TestDecimal(t *testing.T) {
 		if tc.Result != tc.Input {
 			t.Errorf("Error(%s): expected \n`%s`, \ngot \n`%s`", tc.name, tc.Result, tc.Input)
 		}
+	}
+}
+
+func TestFloat(t *testing.T) {
+	d := NewFromFloat(5.56)
+	f := float64(5.56)
+	if df, _ := d.Float64(); df != f {
+		t.Error("Float64 not exact")
+	}
+}
+
+func TestCompare(t *testing.T) {
+	l := NewFromInt(5)
+	h := NewFromInt(10)
+	z := NewFromInt(0)
+
+	if !z.IsZero() {
+		t.Error("zero failed")
+	}
+
+	if h.Cmp(l) != 1 || l.Cmp(h) != -1 || z.Cmp(Zero) != 0 {
+		t.Error("compare fail")
+	}
+}
+
+func TestSign(t *testing.T) {
+	n := NewFromInt(-5)
+	p := NewFromInt(5)
+	z := NewFromInt(0)
+
+	if z.Sign() != 0 {
+		t.Error("zero failed")
+	}
+
+	if n.Sign() != -1 || p.Sign() != 1 {
+		t.Error("sign fail")
 	}
 }
 
@@ -236,18 +298,73 @@ var testParseCases = []testCase{
 	},
 	{
 		"error-1",
-		"number too big",
+		errTooBig.Error(),
 		"100000000000000000",
 	},
 	{
 		"error-2",
-		"number too big",
+		errTooBig.Error(),
 		"10000000000000000",
 	},
 	{
 		"error-3",
-		"invalid syntax",
+		errTooBig.Error(),
+		"10000000000000000.56",
+	},
+	{
+		"error-4",
+		errInvalid.Error(),
 		"0.e0",
+	},
+	{
+		"error-5",
+		errTooBig.Error(),
+		"5555555555555555555555555550000000000000000",
+	},
+	{
+		"error-6",
+		errEmpty.Error(),
+		"-",
+	},
+	{
+		"error-7",
+		errEmpty.Error(),
+		"",
+	},
+	{
+		"error-badint-1",
+		errInvalid.Error(),
+		"1QZ.56",
+	},
+	{
+		"error-expr-1",
+		errInvalid.Error(),
+		"(123 * 6)",
+	},
+	{
+		"missingwhole",
+		"0.50",
+		".50",
+	},
+	{
+		"negmissingwhole",
+		"-0.50",
+		"-.50",
+	},
+	{
+		"missingfrac",
+		"5.00",
+		"5.",
+	},
+	{
+		"neg-missingfrac",
+		"-5.00",
+		"-5.",
+	},
+	{
+		"just-a-decimal",
+		"0.00",
+		".",
 	},
 }
 
@@ -261,6 +378,9 @@ func TestStringParse(t *testing.T) {
 			if err.Error() != tc.Result {
 				t.Fatalf("Error(%s): expected `%s`, got `%s`", tc.name, tc.Result, err)
 			}
+		}
+		if !strings.HasPrefix(tc.name, "error") && err != nil {
+			t.Fatalf("Error(%s): unexpected error `%s`", tc.name, err)
 		}
 		if !strings.HasPrefix(tc.name, "error") && tc.Result != d.StringFixedBank() {
 			t.Errorf("Error(%s): expected \n`%s`, \ngot \n`%s`", tc.name, tc.Result, d.StringFixedBank())
@@ -293,10 +413,25 @@ func FuzzStringParse(f *testing.F) {
 }
 
 func BenchmarkNewFromString(b *testing.B) {
-	numbers := []string{"10.0", "245.6", "3", "2.456"}
-	for n := 0; n < b.N; n++ {
+	numbers := []string{"10.0", "245.6", "354", "2.456", "-31.2"}
+	for b.Loop() {
 		for _, numStr := range numbers {
-			NewFromString(numStr)
+			_, _ = NewFromString(numStr)
+		}
+	}
+}
+
+func BenchmarkStringFixedBank(b *testing.B) {
+	var numbers [1000]Decimal
+	for i := range len(numbers) {
+		numbers[i] = NewFromFloat(rand.Float64() * 100000)
+		if i%2 == 0 {
+			numbers[i] *= -1
+		}
+	}
+	for b.Loop() {
+		for _, num := range numbers {
+			num.StringFixedBank()
 		}
 	}
 }

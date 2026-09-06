@@ -13,6 +13,7 @@
 - [Balance](./02_Balance.md)
 - [Equity](./02_Equity.md)
 - [Import](./02_Import.md)
+- [Export](./02_Export.md)
 - [Print](./02_Print.md)
 - [Register](./02_Register.md)
 - [Stats](./02_Stats.md)
@@ -22,8 +23,12 @@
 	- [Quickview](./Web_Quickview.md)
 	- [General Ledger](./Web_GeneralLedger.md)
 	- [Accounts](./Web_Accounts.md)
+	- [Add Transaction](./Web_AddTransaction.md)
 - [Reports](./Web_Reports.md)
 - [Stock Portfolio](./Web_Portfolio.md)
+
+# Other
+- [Performance](./Performance.md)
 
 -----
 

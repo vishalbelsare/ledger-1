@@ -1,10 +1,10 @@
 package ledger
 
 import (
-	"sort"
+	"slices"
 	"strings"
 
-	"github.com/howeyc/ledger/internal/decimal"
+	"github.com/howeyc/ledger/decimal"
 )
 
 // GetBalances provided a list of transactions and filter strings, returns account balances of
@@ -13,45 +13,60 @@ import (
 //
 // Accounts are sorted by name.
 func GetBalances(generalLedger []*Transaction, filterArr []string) []*Account {
-	balances := make(map[string]decimal.Decimal)
-	filters := len(filterArr) > 0
+	var accList []*Account
+	balances := make(map[string]*Account)
+
+	// at every depth, for each account, track the parent account
+	depthMap := make(map[int]map[string]string)
+	var maxDepth int
+
+	incAccount := func(accName string, val decimal.Decimal) {
+		// track parent
+		accDepth := strings.Count(accName, ":") + 1
+		pmap, pmapfound := depthMap[accDepth]
+		if !pmapfound {
+			pmap = make(map[string]string)
+			depthMap[accDepth] = pmap
+		}
+		if _, foundparent := pmap[accName]; !foundparent && accDepth > 1 {
+			colIdx := strings.LastIndex(accName, ":")
+			pmap[accName] = accName[:colIdx]
+			maxDepth = max(maxDepth, accDepth)
+		}
+
+		// add to balance
+		if acc, ok := balances[accName]; !ok {
+			acc := &Account{Name: accName, Balance: val}
+			accList = append(accList, acc)
+			balances[accName] = acc
+		} else {
+			acc.Balance = acc.Balance.Add(val)
+		}
+	}
+
 	for _, trans := range generalLedger {
 		for _, accChange := range trans.AccountChanges {
-			inFilter := false
-			if filters {
-				for i := 0; i < len(filterArr) && !inFilter; i++ {
-					if strings.Contains(accChange.Name, filterArr[i]) {
-						inFilter = true
-					}
+			inFilter := len(filterArr) == 0
+			for i := 0; i < len(filterArr) && !inFilter; i++ {
+				if strings.Contains(accChange.Name, filterArr[i]) {
+					inFilter = true
 				}
-			} else {
-				inFilter = true
 			}
 			if inFilter {
-				accHier := strings.Split(accChange.Name, ":")
-				accDepth := len(accHier)
-				for currDepth := accDepth; currDepth > 0; currDepth-- {
-					currAccName := strings.Join(accHier[:currDepth], ":")
-					if ratNum, ok := balances[currAccName]; !ok {
-						balances[currAccName] = accChange.Balance
-					} else {
-						balances[currAccName] = ratNum.Add(accChange.Balance)
-					}
-				}
+				incAccount(accChange.Name, accChange.Balance)
 			}
 		}
 	}
 
-	accList := make([]*Account, len(balances))
-	count := 0
-	for accName, accBalance := range balances {
-		account := &Account{Name: accName, Balance: accBalance}
-		accList[count] = account
-		count++
+	// roll-up balances
+	for curDepth := maxDepth; curDepth > 1; curDepth-- {
+		for accName, parentName := range depthMap[curDepth] {
+			incAccount(parentName, balances[accName].Balance)
+		}
 	}
 
-	sort.Slice(accList, func(i, j int) bool {
-		return accList[i].Name < accList[j].Name
+	slices.SortFunc(accList, func(a, b *Account) int {
+		return strings.Compare(a.Name, b.Name)
 	})
 	return accList
 }

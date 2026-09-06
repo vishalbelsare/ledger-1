@@ -4,10 +4,11 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"sync"
 	"testing"
 	"time"
 
-	"github.com/howeyc/ledger/internal/decimal"
+	"github.com/howeyc/ledger/decimal"
 )
 
 type testCase struct {
@@ -43,27 +44,45 @@ var testCases = []testCase{
 		nil,
 	},
 	{
+		"bad payee line",
+		`1970/01/01Payee
+	Expense/test  (123 * 3)
+	Assets      123
+`,
+		nil,
+		errors.New(":1: unable to parse transaction: unable to parse payee line: 1970/01/01Payee"),
+	},
+	{
+		"bad payee date",
+		`1970/02/31 Payee
+	Expense/test  (123 * 3)
+	Assets      123
+`,
+		nil,
+		errors.New(`:1: unable to parse transaction: unable to parse date(1970/02/31): parsing time "1970/02/31": extra text: "1970/02/31"`),
+	},
+	{
 		"unbalanced error",
 		`1970/01/01 Payee
 	Expense/test  (123 * 3)
 	Assets      123
 `,
 		nil,
-		errors.New(":3: Unable to parse transaction: Unable to balance transaction: no empty account to place extra balance"),
+		errors.New(":3: unable to parse transaction: unable to balance transaction: no empty account to place extra balance"),
 	},
 	{
 		"single posting",
 		`1970/01/01 Payee
 	Assets:Account    5`,
 		nil,
-		errors.New(":2: Unable to parse transaction: Unable to balance transaction: need at least two postings"),
+		errors.New(":2: unable to parse transaction: need at least two postings"),
 	},
 	{
 		"no posting",
 		`1970/01/01 Payee
 `,
 		nil,
-		errors.New(":1: Unable to parse transaction: Unable to balance transaction: need at least two postings"),
+		errors.New(":1: unable to parse transaction: need at least two postings"),
 	},
 	{
 		"multiple empty",
@@ -74,7 +93,37 @@ var testCases = []testCase{
 	Bank
 `,
 		nil,
-		errors.New(":5: Unable to parse transaction: Unable to balance transaction: more than one account empty"),
+		errors.New(":5: unable to parse transaction: unable to balance transaction: more than one account empty"),
+	},
+	{
+		"all empty",
+		`1970/01/01 Payee
+	Expense/test
+	Wallet
+	Assets
+	Bank
+`,
+		[]*Transaction{
+			{
+				Payee: "Payee",
+				Date:  time.Unix(0, 0).UTC(),
+				AccountChanges: []Account{
+					{
+						Name: "Expense/test",
+					},
+					{
+						Name: "Wallet",
+					},
+					{
+						Name: "Assets",
+					},
+					{
+						Name: "Bank",
+					},
+				},
+			},
+		},
+		nil,
 	},
 	{
 		"multiple empty lines",
@@ -304,6 +353,35 @@ var testCases = []testCase{
 		nil,
 	},
 	{
+		"empty account comment",
+		`; comment
+	1970/01/01 Payee
+	Expense/test   58
+	Assets                   ; comment in trans
+`,
+		[]*Transaction{
+			{
+				Payee: "Payee",
+				Date:  time.Unix(0, 0).UTC(),
+				AccountChanges: []Account{
+					{
+						Name:    "Expense/test",
+						Balance: decimal.NewFromFloat(58),
+					},
+					{
+						Name:    "Assets",
+						Balance: decimal.NewFromFloat(-58),
+						Comment: "; comment in trans",
+					},
+				},
+				Comments: []string{
+					"; comment",
+				},
+			},
+		},
+		nil,
+	},
+	{
 		"header comment",
 		`; comment
 	1970/01/01 Payee
@@ -452,8 +530,54 @@ func TestParseLedger(t *testing.T) {
 	}
 }
 
+func TestParseLedgerAsync(t *testing.T) {
+	buf := bytes.NewBufferString(`; test
+account bam:bam
+	subacc line  ; sub comment
+	another subacc line
+
+1970/01/01 Payee
+	Assets       50
+	Expenses
+
+1970/02/30 Error  ; oops
+	Assets   30
+	Expenses
+
+1970/01/01bbafafdaf;bad comment
+	Assets 20
+	Expenses
+
+account endofledger`)
+
+	tc, ec := ParseLedgerAsync(buf)
+
+	var trans []*Transaction
+	var errors []error
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		for t := range tc {
+			trans = append(trans, t)
+		}
+		wg.Done()
+	}()
+	go func() {
+		for e := range ec {
+			errors = append(errors, e)
+		}
+		wg.Done()
+	}()
+	wg.Wait()
+
+	if len(trans) < 1 || len(errors) < 1 {
+		t.Error("async parse failed")
+	}
+}
+
 func BenchmarkParseLedger(b *testing.B) {
-	for n := 0; n < b.N; n++ {
+	for b.Loop() {
 		_, _ = ParseLedgerFile("testdata/ledgerBench.dat")
 	}
 }

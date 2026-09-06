@@ -2,20 +2,22 @@ package cmd
 
 import (
 	"log"
-	"sort"
+	"os"
+	"slices"
+	"strings"
 	"time"
 
 	"github.com/howeyc/ledger"
-	"github.com/howeyc/ledger/internal/decimal"
+	"github.com/howeyc/ledger/decimal"
 	"github.com/spf13/cobra"
 )
 
 // equityCmd represents the equity command
 var equityCmd = &cobra.Command{
-	Use:   "equity",
+	Use:   "equity [account-substring-filter]...",
 	Short: "Print account equity as transaction",
 	Run: func(cmd *cobra.Command, args []string) {
-		generalLedger, err := cliTransactions()
+		generalLedger, err := cliTransactions(cmd)
 		if err != nil {
 			log.Fatalln(err)
 		}
@@ -27,17 +29,27 @@ var equityCmd = &cobra.Command{
 			trans.Date = generalLedger[len(generalLedger)-1].Date
 		}
 
+		filterArr := args
 		balances := make(map[string]decimal.Decimal)
 		for _, trans := range generalLedger {
 			for _, accChange := range trans.AccountChanges {
-				if decNum, ok := balances[accChange.Name]; !ok {
-					balances[accChange.Name] = accChange.Balance
-				} else {
-					balances[accChange.Name] = decNum.Add(accChange.Balance)
+				inFilter := len(filterArr) == 0
+				for _, filter := range filterArr {
+					if strings.Contains(accChange.Name, filter) {
+						inFilter = true
+					}
+				}
+				if inFilter {
+					if decNum, ok := balances[accChange.Name]; !ok {
+						balances[accChange.Name] = accChange.Balance
+					} else {
+						balances[accChange.Name] = decNum.Add(accChange.Balance)
+					}
 				}
 			}
 		}
 
+		eqBal := decimal.Zero
 		for name, bal := range balances {
 			if !bal.IsZero() {
 				trans.AccountChanges = append(trans.AccountChanges, ledger.Account{
@@ -45,13 +57,18 @@ var equityCmd = &cobra.Command{
 					Balance: bal,
 				})
 			}
+			eqBal = eqBal.Add(bal)
 		}
-
-		sort.Slice(trans.AccountChanges, func(i, j int) bool {
-			return trans.AccountChanges[i].Name < trans.AccountChanges[j].Name
+		trans.AccountChanges = append(trans.AccountChanges, ledger.Account{
+			Name:    "Equity",
+			Balance: eqBal.Neg(),
 		})
 
-		PrintTransaction(&trans, 80)
+		slices.SortFunc(trans.AccountChanges, func(a, b ledger.Account) int {
+			return strings.Compare(a.Name, b.Name)
+		})
+
+		WriteTransaction(os.Stdout, &trans, 80)
 	},
 }
 
@@ -60,7 +77,7 @@ func init() {
 
 	var startDate, endDate time.Time
 	startDate = time.Date(1970, 1, 1, 0, 0, 0, 0, time.Local)
-	endDate = time.Now().Add(time.Hour * 24)
+	endDate = time.Now().Add(1<<63 - 1)
 	equityCmd.Flags().StringVarP(&startString, "begin-date", "b", startDate.Format(transactionDateFormat), "Begin date of transaction processing.")
 	equityCmd.Flags().StringVarP(&endString, "end-date", "e", endDate.Format(transactionDateFormat), "End date of transaction processing.")
 }

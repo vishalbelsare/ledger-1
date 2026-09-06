@@ -18,9 +18,9 @@ finance greatness.
 
 * Transaction - Series of consecutive lines that represent the move of money
 from one account to one (*or more*) other accounts.
-* Transaction Date - Date the transaction occured.
+* Transaction Date - Date the transaction occurred.
 * Payee - Description following on the same line as the Date. Usually the place
-of business or person the transaction occured at/with.
+of business or person the transaction occurred at/with.
 * Posting - Line containing account and (*optionally*) amount.
 
 ## Basic transaction format
@@ -46,7 +46,7 @@ number of _postings_ per transaction.
 
 Note the _accounts_ used in this example.
 One begins with `Expenses` and the other begins with `Assets`.
-Expenses are _credited_ because the money flows _toward_ them.
+Expenses are _credited_ because the money flows to them.
 Assets are credited when you add funds and debited when you move money to
 something else.
 In this transaction, you're deducting money from an account representing your
@@ -101,8 +101,7 @@ them. Here's an example.
 
 You may be wondering how we track stocks, currencies, commodities, etc.
 All of those are reporting considerations, transactions are all that's contained
-in a ledger file. Simplicity of file formats for possible use with other tools
-is a guiding principle of ledger.
+in a ledger file. Simplicity of the file format is a guiding principle of ledger.
 
 Reporting functions available in ledger are very powerful, and will be introduced
 in later chapters.
@@ -124,7 +123,7 @@ between accounts in transactions. The significance of what a number means or
 represents is entirely up to the user.
 
 **Note:** Even though there is no support for commodities in the ledger file
-format, support for commidities exists in the web reporting features.
+format, support for commodities exists in the web reporting features.
 
 ### Minimal Command Directive Support
 

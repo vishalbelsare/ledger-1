@@ -6,7 +6,7 @@ import "time"
 // specified by start and end. The returned list contains transactions on the same day as start
 // but does not include any transactions on the day of end.
 func TransactionsInDateRange(trans []*Transaction, start, end time.Time) []*Transaction {
-	var newlist []*Transaction
+	newlist := make([]*Transaction, 0, len(trans))
 
 	start = start.Add(-1 * time.Second)
 
@@ -22,7 +22,7 @@ func TransactionsInDateRange(trans []*Transaction, start, end time.Time) []*Tran
 // Period is used to specify the length of a date range or frequency
 type Period string
 
-// Periods suppored by ledger
+// Periods supported by ledger
 const (
 	PeriodDay      Period = "Daily"
 	PeriodWeek     Period = "Weekly"
@@ -129,19 +129,18 @@ func startEndTime(trans []*Transaction) (start, end time.Time) {
 		}
 	}
 
+	// to include last days' transactions in date period splits
+	end = end.Add(time.Second)
+
 	return
 }
 
 // TransactionsByPeriod will return the transactions for each period.
 func TransactionsByPeriod(trans []*Transaction, per Period) []*RangeTransactions {
-	var results []*RangeTransactions
-	if len(trans) < 1 {
-		return results
-	}
-
 	tStart, tEnd := startEndTime(trans)
 
 	boundaries := getDateBoundaries(per, tStart, tEnd)
+	results := make([]*RangeTransactions, 0, len(boundaries)-1)
 
 	bStart := boundaries[0]
 	for _, boundary := range boundaries[1:] {
@@ -165,14 +164,10 @@ type RangeBalance struct {
 
 // BalancesByPeriod will return the account balances for each period.
 func BalancesByPeriod(trans []*Transaction, per Period, rType RangeType) []*RangeBalance {
-	var results []*RangeBalance
-	if len(trans) < 1 {
-		return results
-	}
-
 	tStart, tEnd := startEndTime(trans)
 
 	boundaries := getDateBoundaries(per, tStart, tEnd)
+	results := make([]*RangeBalance, 0, len(boundaries)-1)
 
 	bStart := boundaries[0]
 	for _, boundary := range boundaries[1:] {

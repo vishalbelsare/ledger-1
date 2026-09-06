@@ -97,7 +97,6 @@ type portfolioStruct struct {
 
 type portfolioConfigStruct struct {
 	Portfolios []portfolioStruct `toml:"portfolio"`
-	IEXToken   string            `toml:"iex_token"`
 	AVToken    string            `toml:"av_token"`
 }
 
@@ -110,6 +109,13 @@ type pageData struct {
 	Stocks       []stockInfo
 	Portfolios   []portfolioStruct
 	AccountNames []string
+	ReadOnly     bool
+}
+
+func (p *pageData) Init() {
+	p.ReadOnly = webReadOnly
+	p.Reports = reportConfigData.Reports
+	p.Portfolios = portfolioConfigData.Portfolios
 }
 
 func configLoaders(dur time.Duration) {

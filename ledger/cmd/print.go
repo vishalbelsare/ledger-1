@@ -1,24 +1,44 @@
 package cmd
 
 import (
+	"bufio"
 	"errors"
 	"fmt"
 	"io"
 	"log"
 	"os"
-	"sort"
+	"slices"
 	"strings"
 	"time"
 	"unicode/utf8"
+	"unsafe"
 
 	"github.com/howeyc/ledger"
-	"github.com/howeyc/ledger/internal/decimal"
+	"github.com/howeyc/ledger/decimal"
+	"github.com/howeyc/ledger/ledger/cmd/internal/fastcolor"
+	date "github.com/joyt/godate"
 	"github.com/spf13/cobra"
+	"golang.org/x/term"
 )
 
 const (
 	transactionDateFormat = "2006/01/02"
+	newLine               = "\n"
 )
+
+func formatDate(p []byte, t time.Time) {
+	y, m, d := t.Date()
+	p[0] = byte(y/1000) + '0'
+	p[1] = byte((y/100)%10) + '0'
+	p[2] = byte((y/10)%10) + '0'
+	p[3] = byte(y%10) + '0'
+	p[4] = byte('/')
+	p[5] = byte(m/10) + '0'
+	p[6] = byte(m%10) + '0'
+	p[7] = byte('/')
+	p[8] = byte(d/10) + '0'
+	p[9] = byte(d%10) + '0'
+}
 
 var startString, endString string
 var columnWidth, transactionDepth int
@@ -26,18 +46,22 @@ var showEmptyAccounts bool
 var columnWide bool
 var period string
 var payeeFilter string
+var spaceStr string
 
-func cliTransactions() ([]*ledger.Transaction, error) {
+func cliTransactions(cmd *cobra.Command) ([]*ledger.Transaction, error) {
 	if columnWidth == 80 && columnWide {
 		columnWidth = 132
+		fd := int(os.Stdout.Fd())
+		if term.IsTerminal(fd) {
+			tw, _, err := term.GetSize(fd)
+			if err == nil {
+				columnWidth = tw
+			}
+		}
 	}
 
-	parsedStartDate, tstartErr := time.Parse(transactionDateFormat, startString)
-	parsedEndDate, tendErr := time.Parse(transactionDateFormat, endString)
-
-	if tstartErr != nil || tendErr != nil {
-		return nil, errors.New("unable to parse start or end date string argument")
-	}
+	filterByDate := cmd.Flags().Changed("begin-date") || cmd.Flags().Changed("end-date")
+	filterByPayee := cmd.Flags().Changed("payee")
 
 	var generalLedger []*ledger.Transaction
 	var parseError error
@@ -50,30 +74,32 @@ func cliTransactions() ([]*ledger.Transaction, error) {
 		return nil, parseError
 	}
 
-	sort.SliceStable(generalLedger, func(i, j int) bool {
-		return generalLedger[i].Date.Before(generalLedger[j].Date)
+	slices.SortStableFunc(generalLedger, func(a, b *ledger.Transaction) int {
+		return a.Date.Compare(b.Date)
 	})
 
-	timeStartIndex, timeEndIndex := 0, 0
-	for idx := 0; idx < len(generalLedger); idx++ {
-		if generalLedger[idx].Date.After(parsedStartDate) {
-			timeStartIndex = idx
-			break
-		}
-	}
-	for idx := len(generalLedger) - 1; idx >= 0; idx-- {
-		if generalLedger[idx].Date.Before(parsedEndDate) {
-			timeEndIndex = idx
-			break
-		}
-	}
-	generalLedger = generalLedger[timeStartIndex : timeEndIndex+1]
+	// Only use start/end if specified as arguments
+	if filterByDate {
+		parsedStartDate, tstartErr := date.Parse(startString)
+		parsedEndDate, tendErr := date.Parse(endString)
 
-	origLedger := generalLedger
-	generalLedger = make([]*ledger.Transaction, 0)
-	for _, trans := range origLedger {
-		if strings.Contains(trans.Payee, payeeFilter) {
-			generalLedger = append(generalLedger, trans)
+		if tstartErr != nil || tendErr != nil {
+			return nil, errors.New("unable to parse start or end date string argument")
+		}
+
+		// include end dates' transactions too
+		parsedEndDate = parsedEndDate.Add(time.Second)
+
+		generalLedger = ledger.TransactionsInDateRange(generalLedger, parsedStartDate, parsedEndDate)
+	}
+
+	if filterByPayee {
+		origLedger := generalLedger
+		generalLedger = make([]*ledger.Transaction, 0)
+		for _, trans := range origLedger {
+			if strings.Contains(trans.Payee, payeeFilter) {
+				generalLedger = append(generalLedger, trans)
+			}
 		}
 	}
 
@@ -85,7 +111,7 @@ var printCmd = &cobra.Command{
 	Use:   "print [account-substring-filter]...",
 	Short: "Print transactions in ledger file format",
 	Run: func(cmd *cobra.Command, args []string) {
-		generalLedger, err := cliTransactions()
+		generalLedger, err := cliTransactions(cmd)
 		if err != nil {
 			log.Fatalln(err)
 		}
@@ -99,84 +125,114 @@ func init() {
 
 	var startDate, endDate time.Time
 	startDate = time.Date(1970, 1, 1, 0, 0, 0, 0, time.Local)
-	endDate = time.Now().Add(time.Hour * 24)
+	endDate = time.Now().Add(1<<63 - 1)
 	printCmd.Flags().StringVarP(&startString, "begin-date", "b", startDate.Format(transactionDateFormat), "Begin date of transaction processing.")
 	printCmd.Flags().StringVarP(&endString, "end-date", "e", endDate.Format(transactionDateFormat), "End date of transaction processing.")
 	printCmd.Flags().StringVar(&payeeFilter, "payee", "", "Filter output to payees that contain this string.")
 	printCmd.Flags().IntVar(&columnWidth, "columns", 80, "Set a column width for output.")
-	printCmd.Flags().BoolVar(&columnWide, "wide", false, "Wide output (same as --columns=132).")
+	printCmd.Flags().BoolVar(&columnWide, "wide", false, "Wide output (use terminal width).")
 }
 
 // PrintBalances prints out account balances formatted to a window set to a width of columns.
 // Only shows accounts with names less than or equal to the given depth.
 func PrintBalances(accountList []*ledger.Account, printZeroBalances bool, depth, columns int) {
+	// Calculate widths: 10 columns for balance, rest for accountname
+	if columns < 12 {
+		columns = 12
+		fmt.Fprintf(os.Stderr, "warning: `columns` too small, setting to %d\n", columns)
+	}
+	accWidth := columns - 11
+
+	colorNeg := fastcolor.FgRed
+	colorAccount := fastcolor.FgBlue
+	colorReset := fastcolor.Reset
+
+	var amtBuf [24]byte
+
+	buf := bufio.NewWriter(os.Stdout)
 	overallBalance := decimal.Zero
 	for _, account := range accountList {
-		accDepth := len(strings.Split(account.Name, ":"))
+		accDepth := strings.Count(account.Name, ":") + 1
 		if accDepth == 1 {
 			overallBalance = overallBalance.Add(account.Balance)
 		}
 		if (printZeroBalances || account.Balance.Sign() != 0) && (depth < 0 || accDepth <= depth) {
-			outBalanceString := account.Balance.StringFixedBank()
-			spaceCount := columns - utf8.RuneCountInString(account.Name) - utf8.RuneCountInString(outBalanceString)
-			fmt.Printf("%s%s%s\n", account.Name, strings.Repeat(" ", spaceCount), outBalanceString)
+			n := account.Balance.FixedBank(amtBuf[:])
+			outBalanceString := unsafe.String(unsafe.SliceData(amtBuf[n:]), 24-n)
+			amtColor := colorReset
+			if account.Balance.Sign() < 0 {
+				amtColor = colorNeg
+			}
+			colorAccount.WriteStringFixed(buf, account.Name, accWidth, false)
+			buf.WriteString(" ")
+			amtColor.WriteStringFixed(buf, outBalanceString, 10, true)
+			buf.WriteString(newLine)
 		}
 	}
-	fmt.Println(strings.Repeat("-", columns))
-	outBalanceString := overallBalance.StringFixedBank()
-	spaceCount := columns - utf8.RuneCountInString(outBalanceString)
-	fmt.Printf("%s%s\n", strings.Repeat(" ", spaceCount), outBalanceString)
-}
-
-// PrintTransaction prints a transaction formatted to fit in specified column width.
-func PrintTransaction(trans *ledger.Transaction, columns int) {
-	WriteTransaction(os.Stdout, trans, columns)
+	fmt.Fprintln(buf, strings.Repeat("-", columns))
+	n := overallBalance.FixedBank(amtBuf[:])
+	outBalanceString := unsafe.String(unsafe.SliceData(amtBuf[n:]), 24-n)
+	amtColor := colorReset
+	if overallBalance.Sign() < 0 {
+		amtColor = colorNeg
+	}
+	colorAccount.WriteStringFixed(buf, "", accWidth, false)
+	buf.WriteString(" ")
+	amtColor.WriteStringFixed(buf, outBalanceString, 10, true)
+	buf.WriteString(newLine)
+	buf.Flush()
 }
 
 // WriteTransaction writes a transaction formatted to fit in specified column width.
-func WriteTransaction(w io.Writer, trans *ledger.Transaction, columns int) {
+func WriteTransaction(w io.StringWriter, trans *ledger.Transaction, columns int) {
+	if len(spaceStr) < columns {
+		spaceStr = strings.Repeat(" ", columns)
+	}
+
 	for _, c := range trans.Comments {
-		fmt.Fprintln(w, c)
+		w.WriteString(c)
+		w.WriteString(newLine)
 	}
 
 	// Print accounts sorted by name
-	sort.Slice(trans.AccountChanges, func(i, j int) bool {
-		return trans.AccountChanges[i].Name < trans.AccountChanges[j].Name
+	slices.SortFunc(trans.AccountChanges, func(a, b ledger.Account) int {
+		return strings.Compare(a.Name, b.Name)
 	})
 
-	fmt.Fprintf(w, "%s %s", trans.Date.Format(transactionDateFormat), trans.Payee)
+	var amtBuf [24]byte
+
+	var dateBuf [10]byte
+	formatDate(dateBuf[:], trans.Date)
+	dateString := unsafe.String(unsafe.SliceData(dateBuf[:]), 10)
+	w.WriteString(dateString)
+	w.WriteString(spaceStr[:1])
+	w.WriteString(trans.Payee)
 	if len(trans.PayeeComment) > 0 {
-		spaceCount := columns - 10 - utf8.RuneCountInString(trans.Payee)
-		if spaceCount < 1 {
-			spaceCount = 1
-		}
-		fmt.Fprintf(w, "%s%s", strings.Repeat(" ", spaceCount), trans.PayeeComment)
+		spaceCount := max(columns-10-utf8.RuneCountInString(trans.Payee), 1)
+		w.WriteString(spaceStr[:spaceCount])
+		w.WriteString(trans.PayeeComment)
 	}
-	fmt.Fprintln(w, "")
+	w.WriteString(newLine)
 	for _, accChange := range trans.AccountChanges {
-		outBalanceString := accChange.Balance.StringFixedBank()
-		spaceCount := columns - 4 - utf8.RuneCountInString(accChange.Name) - utf8.RuneCountInString(outBalanceString)
-		if spaceCount < 1 {
-			spaceCount = 1
-		}
-		fmt.Fprintf(w, "    %s%s%s", accChange.Name, strings.Repeat(" ", spaceCount), outBalanceString)
+		n := accChange.Balance.FixedBank(amtBuf[:])
+		outBalanceString := unsafe.String(unsafe.SliceData(amtBuf[n:]), 24-n)
+		spaceCount := max(columns-4-utf8.RuneCountInString(accChange.Name)-utf8.RuneCountInString(outBalanceString), 1)
+		w.WriteString(spaceStr[:4])
+		w.WriteString(accChange.Name)
+		w.WriteString(spaceStr[:spaceCount])
+		w.WriteString(outBalanceString)
 		if len(accChange.Comment) > 0 {
-			fmt.Fprintf(w, " %s", accChange.Comment)
+			w.WriteString(spaceStr[:1])
+			w.WriteString(accChange.Comment)
 		}
-		fmt.Fprintln(w, "")
+		w.WriteString(newLine)
 	}
-	fmt.Fprintln(w, "")
+	w.WriteString(newLine)
 }
 
 // PrintLedger prints all transactions as a formatted ledger file.
 func PrintLedger(generalLedger []*ledger.Transaction, filterArr []string, columns int) {
-	// Print transactions by date
-	if len(generalLedger) > 1 {
-		sort.SliceStable(generalLedger, func(i, j int) bool {
-			return generalLedger[i].Date.Before(generalLedger[j].Date)
-		})
-	}
-
+	buf := bufio.NewWriter(os.Stdout)
 	for _, trans := range generalLedger {
 		inFilter := len(filterArr) == 0
 		for _, accChange := range trans.AccountChanges {
@@ -187,9 +243,10 @@ func PrintLedger(generalLedger []*ledger.Transaction, filterArr []string, column
 			}
 		}
 		if inFilter {
-			PrintTransaction(trans, columns)
+			WriteTransaction(buf, trans, columns)
 		}
 	}
+	buf.Flush()
 }
 
 // PrintRegister prints each transaction that matches the given filters.
@@ -197,12 +254,23 @@ func PrintRegister(generalLedger []*ledger.Transaction, filterArr []string, colu
 	// Calculate widths for variable-length part of output
 	// 3 10-width columns (date, account-change, running-total)
 	// 4 spaces
+	if columns < 35 {
+		columns = 35
+		fmt.Fprintf(os.Stderr, "warning: `columns` too small, setting to %d\n", columns)
+	}
 	remainingWidth := columns - (10 * 3) - (4 * 1)
 	col1width := remainingWidth / 3
 	col2width := remainingWidth - col1width
 
-	formatString := fmt.Sprintf("%%-10.10s %%-%[1]d.%[1]ds %%-%[2]d.%[2]ds %%10.10s %%10.10s\n", col1width, col2width)
+	colorNeg := fastcolor.FgRed
+	colorPayee := fastcolor.Bold
+	colorAccount := fastcolor.FgBlue
+	colorReset := fastcolor.Reset
 
+	var amtBuf [24]byte
+	var dateBuf [10]byte
+
+	buf := bufio.NewWriter(os.Stdout)
 	runningBalance := decimal.Zero
 	for _, trans := range generalLedger {
 		for _, accChange := range trans.AccountChanges {
@@ -214,15 +282,33 @@ func PrintRegister(generalLedger []*ledger.Transaction, filterArr []string, colu
 			}
 			if inFilter {
 				runningBalance = runningBalance.Add(accChange.Balance)
-				outBalanceString := accChange.Balance.StringFixedBank()
-				outRunningBalanceString := runningBalance.StringFixedBank()
-				fmt.Printf(formatString,
-					trans.Date.Format(transactionDateFormat),
-					trans.Payee,
-					accChange.Name,
-					outBalanceString,
-					outRunningBalanceString)
+
+				balamtColor := colorReset
+				if accChange.Balance.Sign() < 0 {
+					balamtColor = colorNeg
+				}
+				runamtColor := colorReset
+				if runningBalance.Sign() < 0 {
+					runamtColor = colorNeg
+				}
+
+				formatDate(dateBuf[:], trans.Date)
+				buf.Write(dateBuf[:])
+				buf.WriteString(" ")
+				colorPayee.WriteStringFixed(buf, trans.Payee, col1width, false)
+				buf.WriteString(" ")
+				colorAccount.WriteStringFixed(buf, accChange.Name, col2width, false)
+				buf.WriteString(" ")
+				n := accChange.Balance.FixedBank(amtBuf[:])
+				outBalanceString := unsafe.String(unsafe.SliceData(amtBuf[n:]), 24-n)
+				balamtColor.WriteStringFixed(buf, outBalanceString, 10, true)
+				buf.WriteString(" ")
+				n = runningBalance.FixedBank(amtBuf[:])
+				outRunningBalanceString := unsafe.String(unsafe.SliceData(amtBuf[n:]), 24-n)
+				runamtColor.WriteStringFixed(buf, outRunningBalanceString, 10, true)
+				buf.WriteString(newLine)
 			}
 		}
 	}
+	buf.Flush()
 }

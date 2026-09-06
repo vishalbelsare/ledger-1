@@ -3,19 +3,19 @@ package cmd
 import (
 	"fmt"
 	"net/http"
+	"slices"
 	"sort"
 	"strings"
 	"time"
 
 	"github.com/howeyc/ledger"
-	"github.com/howeyc/ledger/internal/decimal"
+	"github.com/howeyc/ledger/decimal"
 	"github.com/howeyc/ledger/ledger/cmd/internal/pdr"
-	"github.com/julienschmidt/httprouter"
 	colorful "github.com/lucasb-eyer/go-colorful"
 )
 
 func getRangeAndPeriod(dateRange, dateFreq string) (start, end time.Time, period ledger.Period, err error) {
-	period = ledger.Period(dateFreq)
+	period = strToPeriod(dateFreq)
 
 	start, end, err = pdr.ParseRange(dateRange, time.Now())
 
@@ -25,15 +25,15 @@ func getRangeAndPeriod(dateRange, dateFreq string) (start, end time.Time, period
 // getAccounts will return the accounts that match accountNeedle.
 // If accountNeedle contains no wildcards (*), only case-sensitive matchs are returned.
 // In the case of wildcards:
-//	* matches any account that shares the prefix, and has the same depth as the *.
-//	** matches any account that shares the prefix, at furthest depth possible,
-//	ignoring parent accounts to avoid duplicates
+//
+//	"*" -  matches any account that shares the prefix, and has the same depth as the *.
+//	"**" - matches any account that shares the prefix, at furthest depth possible, ignoring parent accounts to avoid duplicates.
 func getAccounts(accountNeedle string, accountsHaystack []*ledger.Account) (results []*ledger.Account) {
 	needleDepth := len(strings.Split(accountNeedle, ":"))
 
-	if dblstarIdx := strings.Index(accountNeedle, "**"); dblstarIdx != -1 {
+	if before, _, ok := strings.Cut(accountNeedle, "**"); ok {
 		foundAccountNames := make(map[string]*ledger.Account)
-		prefixNeedle := accountNeedle[:dblstarIdx]
+		prefixNeedle := before
 		for _, hay := range accountsHaystack {
 			if strings.HasPrefix(hay.Name, prefixNeedle) {
 				foundAccountNames[hay.Name] = hay
@@ -48,8 +48,8 @@ func getAccounts(accountNeedle string, accountsHaystack []*ledger.Account) (resu
 		for _, hay := range foundAccountNames {
 			results = append(results, hay)
 		}
-	} else if starIdx := strings.Index(accountNeedle, "*"); starIdx != -1 {
-		prefixNeedle := accountNeedle[:starIdx]
+	} else if before, _, ok := strings.Cut(accountNeedle, "*"); ok {
+		prefixNeedle := before
 		for _, hay := range accountsHaystack {
 			hayDepth := len(strings.Split(hay.Name, ":"))
 			if strings.HasPrefix(hay.Name, prefixNeedle) && hayDepth == needleDepth {
@@ -120,6 +120,33 @@ func calcBalances(calcAccts []calculatedAccount, balances []*ledger.Account) (re
 	return
 }
 
+// calcTransaction will create one-posting transactions for any calculated accounts
+func calcTransaction(calcAccts []calculatedAccount, trans *ledger.Transaction) (results []*ledger.Transaction) {
+	for _, calcAccount := range calcAccts {
+		for i, accChange := range trans.AccountChanges {
+			include := false
+			accIdx := -1
+			for _, acctOp := range calcAccount.AccountOperations {
+				if strings.HasPrefix(accChange.Name, acctOp.Name) && acctOp.Operation == "+" {
+					include = true
+					accIdx = i
+				}
+				if strings.HasPrefix(accChange.Name, acctOp.Name) && acctOp.Operation == "-" {
+					include = false
+				}
+			}
+			if include {
+				newtrans := *trans
+				newtrans.AccountChanges = []ledger.Account{trans.AccountChanges[accIdx]}
+				newtrans.AccountChanges[0].Name = calcAccount.Name
+				results = append(results, &newtrans)
+			}
+		}
+	}
+
+	return
+}
+
 // Merge multiple account changes for each distinct account
 func mergeAccounts(input *ledger.Transaction) {
 	balmap := make(map[string]decimal.Decimal)
@@ -140,13 +167,13 @@ func mergeAccounts(input *ledger.Transaction) {
 	}
 
 	// Map is random order, order by name for consistency (helps with tests)
-	sort.Slice(input.AccountChanges, func(i, j int) bool {
-		return input.AccountChanges[i].Name < input.AccountChanges[j].Name
+	slices.SortFunc(input.AccountChanges, func(a, b ledger.Account) int {
+		return strings.Compare(a.Name, b.Name)
 	})
 }
 
-func reportHandler(w http.ResponseWriter, r *http.Request, params httprouter.Params) {
-	reportName := params.ByName("reportName")
+func reportHandler(w http.ResponseWriter, r *http.Request) {
+	reportName := r.PathValue("reportName")
 
 	trans, terr := getTransactions()
 	if terr != nil {
@@ -215,9 +242,16 @@ func reportHandler(w http.ResponseWriter, r *http.Request, params httprouter.Par
 				}
 			}
 		}
+
 		if include {
 			mergeAccounts(trans)
 			vtrans = append(vtrans, trans)
+		}
+
+		// calculated transaction
+		ctrans := calcTransaction(rConf.CalculatedAccounts, trans)
+		for _, ct := range ctrans {
+			vtrans = append(vtrans, ct)
 		}
 	}
 
@@ -245,7 +279,8 @@ func reportHandler(w http.ResponseWriter, r *http.Request, params httprouter.Par
 			}
 		}
 
-		sort.Slice(values, func(i, j int) bool { return values[i].Balance.Cmp(values[j].Balance) > 0 })
+		// descending (-1 to reverse order)
+		slices.SortFunc(values, func(a, b lbAccount) int { return -1 * a.Balance.Cmp(b.Balance) })
 
 		maxIdx := 0
 		for idx := range values {
@@ -268,8 +303,7 @@ func reportHandler(w http.ResponseWriter, r *http.Request, params httprouter.Par
 		}
 
 		var pData lbPageData
-		pData.Reports = reportConfigData.Reports
-		pData.Portfolios = portfolioConfigData.Portfolios
+		pData.Init()
 		pData.Transactions = vtrans
 		pData.ChartType = "Leaderboard"
 		pData.ChartAccounts = values
@@ -321,8 +355,7 @@ func reportHandler(w http.ResponseWriter, r *http.Request, params httprouter.Par
 		}
 
 		var pData piePageData
-		pData.Reports = reportConfigData.Reports
-		pData.Portfolios = portfolioConfigData.Portfolios
+		pData.Init()
 		pData.Transactions = vtrans
 		pData.ChartAccounts = values
 		pData.RangeStart = rStart
@@ -368,8 +401,8 @@ func reportHandler(w http.ResponseWriter, r *http.Request, params httprouter.Par
 			DataSets             []lineData
 		}
 		var lData linePageData
-		lData.Reports = reportConfigData.Reports
-		lData.Portfolios = portfolioConfigData.Portfolios
+		lData.Init()
+		lData.Transactions = vtrans
 		lData.ReportName = reportName
 
 		for colorIdx, repAccount := range reportSummaryAccounts {
@@ -417,7 +450,7 @@ func reportHandler(w http.ResponseWriter, r *http.Request, params httprouter.Par
 				lData.RangeStart = rb.Start
 			}
 			lData.RangeEnd = rb.End
-			lData.Labels = append(lData.Labels, rb.End.Format("2006-01-02"))
+			lData.Labels = append(lData.Labels, rb.End.Format(time.DateOnly))
 
 			accVals := make(map[string]decimal.Decimal)
 			for _, confAccount := range rConf.Accounts {
@@ -443,6 +476,14 @@ func reportHandler(w http.ResponseWriter, r *http.Request, params httprouter.Par
 			lData.AccountNames = append(lData.AccountNames, ca.AccountName)
 		}
 		sort.Strings(lData.AccountNames[1:])
+
+		// For line, set origin value
+		if rConf.Chart == "line" && len(rangeBalances) > 0 {
+			lData.Labels = append([]string{rangeBalances[0].Start.Format(time.DateOnly)}, lData.Labels...)
+			for dIdx := range lData.DataSets {
+				lData.DataSets[dIdx].Values = append([]decimal.Decimal{decimal.Zero}, lData.DataSets[dIdx].Values...)
+			}
+		}
 
 		// Radar chart flips everything. Dates are each dataset and the accounts become the labels
 		if rConf.Chart == "radar" {
@@ -474,8 +515,6 @@ func reportHandler(w http.ResponseWriter, r *http.Request, params httprouter.Par
 			lData.AccountNames = append([]string{"All"}, accNames...)
 			sort.Strings(lData.AccountNames[1:])
 		}
-
-		lData.Transactions = vtrans
 
 		t, err := loadTemplates("templates/template.barlinechart.html")
 		if err != nil {

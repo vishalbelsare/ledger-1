@@ -1,15 +1,16 @@
 package cmd
 
 import (
+	"cmp"
 	"net/http"
-	"sort"
+	"slices"
+	"strings"
 
 	"github.com/howeyc/ledger"
-	"github.com/julienschmidt/httprouter"
 )
 
-func portfolioHandler(w http.ResponseWriter, r *http.Request, params httprouter.Params) {
-	portfolioName := params.ByName("portfolioName")
+func portfolioHandler(w http.ResponseWriter, r *http.Request) {
+	portfolioName := r.PathValue("portfolioName")
 
 	var portfolio portfolioStruct
 	for _, port := range portfolioConfigData.Portfolios {
@@ -39,8 +40,7 @@ func portfolioHandler(w http.ResponseWriter, r *http.Request, params httprouter.
 	}
 
 	var pData portPageData
-	pData.Reports = reportConfigData.Reports
-	pData.Portfolios = portfolioConfigData.Portfolios
+	pData.Init()
 	pData.Transactions = trans
 	pData.PortfolioName = portfolioName
 	pData.ShowDividends = portfolio.ShowDividends
@@ -64,28 +64,14 @@ func portfolioHandler(w http.ResponseWriter, r *http.Request, params httprouter.
 			cprice := si.Cost / si.Shares
 			var sprice, sclose float64
 			switch securityType {
-			case "Stock":
-				quote, qerr := stockQuote(symbol)
-				if qerr == nil {
-					sprice = quote.Last
-					if quote.Close > 0 {
-						sclose = quote.Close
-					} else {
-						sclose = quote.PreviousClose
-					}
-				}
-				if portfolio.ShowDividends {
-					div, _ := stockAnnualDividends(symbol)
-					si.AnnualDividends = div * shares
-				}
-			case "Fund":
+			case "Stock", "Fund":
 				quote, qerr := fundQuote(symbol)
 				if qerr == nil {
 					sprice = quote.Last
 					sclose = quote.PreviousClose
 				}
 				if portfolio.ShowDividends {
-					div, _ := fundAnnualDividends(symbol)
+					div := fundAnnualDividends(symbol)
 					si.AnnualDividends = div * shares
 				}
 			case "Crypto":
@@ -163,11 +149,11 @@ func portfolioHandler(w http.ResponseWriter, r *http.Request, params httprouter.
 		pData.Stocks = append(pData.Stocks, sectionInfo)
 	}
 
-	sort.Slice(pData.Stocks, func(i, j int) bool {
-		return pData.Stocks[i].Ticker < pData.Stocks[j].Ticker
-	})
-	sort.SliceStable(pData.Stocks, func(i, j int) bool {
-		return pData.Stocks[i].Section < pData.Stocks[j].Section
+	slices.SortFunc(pData.Stocks, func(a, b stockInfo) int {
+		return cmp.Or(
+			strings.Compare(a.Section, b.Section),
+			strings.Compare(a.Ticker, b.Ticker),
+		)
 	})
 
 	err = t.Execute(w, pData)

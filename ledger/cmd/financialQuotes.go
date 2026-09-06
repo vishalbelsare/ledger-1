@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"context"
 	"encoding/csv"
 	"encoding/json"
 	"errors"
@@ -8,33 +9,13 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/patrickmn/go-cache"
+	"golang.org/x/time/rate"
 )
 
-type iexQuote struct {
-	Company       string  `json:"companyName"`
-	Exchange      string  `json:"primaryExchange"`
-	Close         float64 `json:"close"`
-	PreviousClose float64 `json:"previousClose"`
-	Last          float64 `json:"latestPrice"`
-}
-
-// https://iexcloud.io/docs/api/
-func stockQuote(symbol string) (quote iexQuote, err error) {
-	resp, herr := http.Get("https://cloud.iexapis.com/beta/stock/" + symbol + "/quote?token=" + portfolioConfigData.IEXToken)
-	if herr != nil {
-		return quote, herr
-	}
-	defer resp.Body.Close()
-	dec := json.NewDecoder(resp.Body)
-	derr := dec.Decode(&quote)
-	if derr != nil {
-		return quote, derr
-	}
-	if quote.Company == "" && quote.Exchange == "" {
-		return quote, errors.New("Unable to find data for symbol " + symbol)
-	}
-	return quote, nil
-}
+// Alpha Vantage allows 5 per minute, we do 4 per minute
+var avLimiter *rate.Limiter = rate.NewLimiter(rate.Every(time.Minute/4), 1)
 
 type avQuote struct {
 	Symbol        string
@@ -43,30 +24,48 @@ type avQuote struct {
 	Last          float64
 }
 
+// Alpha Vantage allows 500 requests per day. Since we don't care about realtime
+// values, we cache results for 24 hours.
+var avqCache *cache.Cache = cache.New(time.Hour*24, time.Hour)
+
 // https://www.alphavantage.co/documentation/#latestprice
 func fundQuote(symbol string) (quote avQuote, err error) {
-	resp, herr := http.Get("https://alphavantage.co/query?function=GLOBAL_QUOTE&symbol=" + symbol + "&datatype=csv&apikey=" + portfolioConfigData.AVToken)
-	if herr != nil {
-		return quote, herr
-	}
-	defer resp.Body.Close()
-	cr := csv.NewReader(resp.Body)
-
-	recs, cerr := cr.ReadAll()
-	if cerr != nil {
-		return quote, cerr
-	}
-	// symbol,open,high,low,price,volume,latestDay,previousClose,change,changePercent
-	if len(recs) != 2 || len(recs[0]) != 10 {
-		return quote, errors.New("bad csv")
+	if avq, found := avqCache.Get(symbol); found {
+		return avq.(avQuote), nil
 	}
 
-	quote.Symbol = recs[1][0]
-	quote.Open, _ = strconv.ParseFloat(recs[1][1], 64)
-	quote.Last, _ = strconv.ParseFloat(recs[1][4], 64)
-	quote.PreviousClose, _ = strconv.ParseFloat(recs[1][7], 64)
+	go func() {
+		avLimiter.Wait(context.Background())
 
-	return quote, nil
+		req, rerr := http.NewRequestWithContext(context.Background(), http.MethodGet, "https://alphavantage.co/query?function=GLOBAL_QUOTE&symbol="+symbol+"&datatype=csv&apikey="+portfolioConfigData.AVToken, http.NoBody)
+		if rerr != nil {
+			return
+		}
+		resp, herr := http.DefaultClient.Do(req)
+		if herr != nil {
+			return
+		}
+		defer resp.Body.Close()
+		cr := csv.NewReader(resp.Body)
+
+		recs, cerr := cr.ReadAll()
+		if cerr != nil {
+			return
+		}
+		// symbol,open,high,low,price,volume,latestDay,previousClose,change,changePercent
+		if len(recs) != 2 || len(recs[0]) != 10 {
+			return
+		}
+
+		quote.Symbol = recs[1][0]
+		quote.Open, _ = strconv.ParseFloat(recs[1][1], 64)
+		quote.Last, _ = strconv.ParseFloat(recs[1][4], 64)
+		quote.PreviousClose, _ = strconv.ParseFloat(recs[1][7], 64)
+
+		avqCache.Add(symbol, quote, cache.DefaultExpiration)
+	}()
+
+	return quote, errors.New("not cached")
 }
 
 type gdaxQuote struct {
@@ -77,7 +76,11 @@ type gdaxQuote struct {
 
 // https://docs.pro.coinbase.com/
 func cryptoQuote(symbol string) (quote gdaxQuote, err error) {
-	resp, herr := http.Get("https://api.pro.coinbase.com/products/" + symbol + "/stats")
+	req, rerr := http.NewRequestWithContext(context.Background(), http.MethodGet, "https://api.pro.coinbase.com/products/"+symbol+"/stats", http.NoBody)
+	if rerr != nil {
+		return
+	}
+	resp, herr := http.DefaultClient.Do(req)
 	if herr != nil {
 		return quote, herr
 	}
@@ -93,96 +96,59 @@ func cryptoQuote(symbol string) (quote gdaxQuote, err error) {
 	return quote, nil
 }
 
-type iexDividend struct {
-	Amount       float64 `json:"amount"`
-	Currency     string  `json:"currency"`
-	DeclaredDate string  `json:"declaredDate"`
-	Description  string  `json:"description"`
-	ExDate       string  `json:"exDate"`
-	Flag         string  `json:"flag"`
-	Frequency    string  `json:"frequency"`
-	PaymentDate  string  `json:"paymentDate"`
-	RecordDate   string  `json:"recordDate"`
-	Refid        int     `json:"refid"`
-	Symbol       string  `json:"symbol"`
-	ID           string  `json:"id"`
-	Key          string  `json:"key"`
-	Subkey       string  `json:"subkey"`
-	Date         int64   `json:"date"`
-	Updated      float64 `json:"updated"`
-}
-
-// https://iexcloud.io/docs/api/
-func stockAnnualDividends(symbol string) (amount float64, err error) {
-	var dividends []iexDividend
-	resp, herr := http.Get("https://cloud.iexapis.com/beta/stock/" + symbol + "/dividends/1y?token=" + portfolioConfigData.IEXToken)
-	if herr != nil {
-		return 0, herr
-	}
-	defer resp.Body.Close()
-	dec := json.NewDecoder(resp.Body)
-	derr := dec.Decode(&dividends)
-	if derr != nil {
-		return 0, derr
-	}
-
-	// possible exDate issues, may get an extra
-	if len(dividends) > 0 {
-		switch dividends[0].Frequency {
-		case "quarterly":
-			if len(dividends) > 4 {
-				dividends = dividends[:4]
-			}
-		case "monthly":
-			if len(dividends) > 12 {
-				dividends = dividends[:12]
-			}
-		case "semi-annual":
-			if len(dividends) > 2 {
-				dividends = dividends[:2]
-			}
-		}
-	}
-
-	for _, div := range dividends {
-		amount += div.Amount
-	}
-	return amount, nil
-}
+// Alpha Vantage allows 500 requests per day. Since we don't care about realtime
+// values, we cache results for 24 hours.
+var avdCache *cache.Cache = cache.New(time.Hour*24, time.Hour)
 
 // https://www.alphavantage.co/documentation/#weeklyadj
-func fundAnnualDividends(symbol string) (amount float64, err error) {
-	yearAgo := time.Now().AddDate(-1, 0, 0).Format("2006-01-02")
-	resp, herr := http.Get("https://www.alphavantage.co/query?function=TIME_SERIES_WEEKLY_ADJUSTED&datatype=csv&symbol=" + symbol + "&apikey=" + portfolioConfigData.AVToken)
-	if herr != nil {
-		return 0, herr
-	}
-	defer resp.Body.Close()
-	cr := csv.NewReader(resp.Body)
-	recs, cerr := cr.ReadAll()
-	if cerr != nil {
-		return 0, cerr
-	}
-	divIdx := -1
-	if len(recs) < 2 {
-		return 0, errors.New("csv reponse empty")
+func fundAnnualDividends(symbol string) float64 {
+	if div, found := avdCache.Get(symbol); found {
+		return div.(float64)
 	}
 
-	for i := range recs[0] {
-		if strings.Contains(recs[0][i], "dividend") {
-			divIdx = i
+	go func() {
+		avLimiter.Wait(context.Background())
+
+		req, rerr := http.NewRequestWithContext(context.Background(), http.MethodGet, "https://www.alphavantage.co/query?function=TIME_SERIES_WEEKLY_ADJUSTED&datatype=csv&symbol="+symbol+"&apikey="+portfolioConfigData.AVToken, http.NoBody)
+		if rerr != nil {
+			return
 		}
-	}
-
-	if divIdx < 0 {
-		return 0, errors.New("unable to find dividend column")
-	}
-
-	for _, rec := range recs[1:] {
-		if div, derr := strconv.ParseFloat(rec[divIdx], 64); rec[0] > yearAgo && derr == nil {
-			amount += div
+		resp, herr := http.DefaultClient.Do(req)
+		if herr != nil {
+			return
 		}
-	}
+		defer resp.Body.Close()
+		cr := csv.NewReader(resp.Body)
+		recs, cerr := cr.ReadAll()
+		if cerr != nil {
+			return
+		}
+		divIdx := -1
+		if len(recs) < 2 {
+			return
+		}
 
-	return amount, nil
+		for i := range recs[0] {
+			if strings.Contains(recs[0][i], "dividend") {
+				divIdx = i
+			}
+		}
+
+		if divIdx < 0 {
+			return
+		}
+
+		yearAgo := time.Now().AddDate(-1, 0, 0).Format(time.DateOnly)
+
+		var amount float64
+		for _, rec := range recs[1:] {
+			if div, derr := strconv.ParseFloat(rec[divIdx], 64); rec[0] > yearAgo && derr == nil {
+				amount += div
+			}
+		}
+
+		avdCache.Add(symbol, amount, cache.DefaultExpiration)
+	}()
+
+	return 0
 }

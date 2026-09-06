@@ -9,10 +9,9 @@ import (
 	"time"
 
 	"github.com/howeyc/ledger"
-	"github.com/julienschmidt/httprouter"
 )
 
-func quickviewHandler(w http.ResponseWriter, r *http.Request, _ httprouter.Params) {
+func quickviewHandler(w http.ResponseWriter, r *http.Request) {
 	if len(quickviewConfigData.Accounts) < 1 {
 		http.Redirect(w, r, "/accounts", http.StatusFound)
 		return
@@ -31,8 +30,7 @@ func quickviewHandler(w http.ResponseWriter, r *http.Request, _ httprouter.Param
 	}
 
 	var pData pageData
-	pData.Reports = reportConfigData.Reports
-	pData.Portfolios = portfolioConfigData.Portfolios
+	pData.Init()
 	pData.Transactions = trans
 
 	includeNames := make(map[string]bool)
@@ -53,7 +51,7 @@ func quickviewHandler(w http.ResponseWriter, r *http.Request, _ httprouter.Param
 	}
 }
 
-func addTransactionPostHandler(w http.ResponseWriter, r *http.Request, _ httprouter.Params) {
+func addTransactionPostHandler(w http.ResponseWriter, r *http.Request) {
 	strDate := r.FormValue("transactionDate")
 	strPayee := r.FormValue("transactionPayee")
 
@@ -64,7 +62,7 @@ func addTransactionPostHandler(w http.ResponseWriter, r *http.Request, _ httprou
 		accountLines = append(accountLines, strings.Trim(fmt.Sprintf("%s          %s", strAcc, strAmt), " \t"))
 	}
 
-	date, _ := time.Parse("2006-01-02", strDate)
+	date, _ := time.Parse(time.DateOnly, strDate)
 
 	var tbuf bytes.Buffer
 	fmt.Fprintln(&tbuf, date.Format("2006/01/02"), strPayee)
@@ -100,8 +98,8 @@ func addTransactionPostHandler(w http.ResponseWriter, r *http.Request, _ httprou
 	fmt.Fprintf(w, "Transaction added!")
 }
 
-func addQuickTransactionHandler(w http.ResponseWriter, r *http.Request, params httprouter.Params) {
-	accountName := params.ByName("accountName")
+func addQuickTransactionHandler(w http.ResponseWriter, r *http.Request) {
+	accountName := r.PathValue("accountName")
 
 	t, err := loadTemplates("templates/template.addtransaction.html")
 	if err != nil {
@@ -148,8 +146,7 @@ func addQuickTransactionHandler(w http.ResponseWriter, r *http.Request, params h
 	}
 
 	var pData pageData
-	pData.Reports = reportConfigData.Reports
-	pData.Portfolios = portfolioConfigData.Portfolios
+	pData.Init()
 	pData.Accounts = abals
 	pData.Transactions = atrans
 	pData.AccountNames = []string{accountName}
@@ -160,7 +157,7 @@ func addQuickTransactionHandler(w http.ResponseWriter, r *http.Request, params h
 	}
 }
 
-func addTransactionHandler(w http.ResponseWriter, r *http.Request, _ httprouter.Params) {
+func addTransactionHandler(w http.ResponseWriter, _ *http.Request) {
 	t, err := loadTemplates("templates/template.addtransaction.html")
 	if err != nil {
 		http.Error(w, err.Error(), 500)
@@ -175,8 +172,7 @@ func addTransactionHandler(w http.ResponseWriter, r *http.Request, _ httprouter.
 	balances := ledger.GetBalances(trans, []string{})
 
 	var pData pageData
-	pData.Reports = reportConfigData.Reports
-	pData.Portfolios = portfolioConfigData.Portfolios
+	pData.Init()
 	pData.Accounts = balances
 	pData.Transactions = trans
 
@@ -186,7 +182,7 @@ func addTransactionHandler(w http.ResponseWriter, r *http.Request, _ httprouter.
 	}
 }
 
-func accountsHandler(w http.ResponseWriter, r *http.Request, _ httprouter.Params) {
+func accountsHandler(w http.ResponseWriter, _ *http.Request) {
 	t, err := loadTemplates("templates/template.accounts.html")
 	if err != nil {
 		http.Error(w, err.Error(), 500)
@@ -202,8 +198,7 @@ func accountsHandler(w http.ResponseWriter, r *http.Request, _ httprouter.Params
 	balances := ledger.GetBalances(trans, []string{})
 
 	var pData pageData
-	pData.Reports = reportConfigData.Reports
-	pData.Portfolios = portfolioConfigData.Portfolios
+	pData.Init()
 	pData.Accounts = balances
 	pData.Transactions = trans
 
@@ -213,8 +208,8 @@ func accountsHandler(w http.ResponseWriter, r *http.Request, _ httprouter.Params
 	}
 }
 
-func accountHandler(w http.ResponseWriter, r *http.Request, params httprouter.Params) {
-	accountName := params.ByName("accountName")
+func accountHandler(w http.ResponseWriter, r *http.Request) {
+	accountName := r.PathValue("accountName")
 
 	t, err := loadTemplates("templates/template.account.html")
 	if err != nil {
@@ -242,8 +237,7 @@ func accountHandler(w http.ResponseWriter, r *http.Request, params httprouter.Pa
 	}
 
 	var pData pageData
-	pData.Reports = reportConfigData.Reports
-	pData.Portfolios = portfolioConfigData.Portfolios
+	pData.Init()
 	pData.Transactions = pageTrans
 	pData.AccountNames = []string{accountName}
 
